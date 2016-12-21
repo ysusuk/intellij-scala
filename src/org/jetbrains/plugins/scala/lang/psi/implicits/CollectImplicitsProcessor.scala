@@ -4,107 +4,93 @@ import com.intellij.psi._
 import com.intellij.psi.util.PsiTreeUtil
 import org.jetbrains.plugins.scala.lang.psi.api.base.patterns.ScBindingPattern
 import org.jetbrains.plugins.scala.lang.psi.api.expr.ScExpression
+import org.jetbrains.plugins.scala.lang.psi.api.statements._
 import org.jetbrains.plugins.scala.lang.psi.api.statements.params.{ScClassParameter, ScParameter}
-import org.jetbrains.plugins.scala.lang.psi.api.statements.{ScDeclaredElementsHolder, ScFunction, ScValue, ScVariable}
-import org.jetbrains.plugins.scala.lang.psi.api.toplevel.ScModifierListOwner
+import org.jetbrains.plugins.scala.lang.psi.api.toplevel.ScTypedDefinition
 import org.jetbrains.plugins.scala.lang.psi.api.toplevel.typedef.{ScMember, ScObject, ScTrait}
 import org.jetbrains.plugins.scala.lang.psi.impl.ScalaPsiManager
+import org.jetbrains.plugins.scala.lang.psi.types.ScalaType.designator
 import org.jetbrains.plugins.scala.lang.psi.types.api.{TypeParameterType, TypeSystem, UndefinedType}
-import org.jetbrains.plugins.scala.lang.psi.types.result.TypingContext
 import org.jetbrains.plugins.scala.lang.psi.types.{ScParameterizedType, ScSubstitutor, ScType, ScalaType}
 import org.jetbrains.plugins.scala.lang.psi.{ScalaPsiElement, ScalaPsiUtil}
+import org.jetbrains.plugins.scala.lang.resolve.ResolveUtils.isAccessible
 import org.jetbrains.plugins.scala.lang.resolve.processor.{BaseProcessor, ImplicitProcessor}
-import org.jetbrains.plugins.scala.lang.resolve.{ResolveUtils, ScalaResolveResult, StdKinds}
+import org.jetbrains.plugins.scala.lang.resolve.{ScalaResolveResult, StdKinds}
 
 /**
   * @author adkozlov
   */
-class CollectImplicitsProcessor(expression: ScExpression, withoutPrecedence: Boolean)
+class CollectImplicitsProcessor(val getPlace: ScExpression, withoutPrecedence: Boolean)
                                (implicit override val typeSystem: TypeSystem)
   extends ImplicitProcessor(StdKinds.refExprLastRef, withoutPrecedence) {
-  //can be null (in Unit tests or without library)
-  private val funType: ScType = {
-    val funClass: PsiClass = ScalaPsiManager.instance(getPlace.getProject).getCachedClass(getPlace.getResolveScope, "scala.Function1").orNull
-    funClass match {
-      case cl: ScTrait => ScParameterizedType(ScalaType.designator(funClass), cl.typeParameters.map(tp =>
-        UndefinedType(TypeParameterType(tp))))
-      case _ => null
-    }
-  }
-
-  protected def getPlace: PsiElement = expression
 
   def execute(element: PsiElement, state: ResolveState): Boolean = {
-    lazy val subst: ScSubstitutor = state.get(BaseProcessor.FROM_TYPE_KEY) match {
-      case null => getSubst(state)
-      case tp => getSubst(state).followUpdateThisType(tp)
+    val function1Type = ScalaPsiManager.instance(getPlace.getProject)
+      .getCachedClass(getPlace.getResolveScope, "scala.Function1")
+      .collect {
+        case t: ScTrait => t
+      }.map { t =>
+      val parameters = t.typeParameters
+        .map(TypeParameterType(_))
+        .map(UndefinedType(_))
+
+      ScParameterizedType(designator(t), parameters)
+    }.getOrElse {
+      return true
     }
 
     import CollectImplicitsProcessor._
-    element match {
-      case named: PsiNamedElement if kindMatches(element) => named match {
-        //there is special case for Predef.conforms method
-        case f: ScFunction if f.hasModifierProperty("implicit") && !isConformsMethod(f) =>
-          if (!checkFucntionIsEligible(f, getPlace) ||
-            !ResolveUtils.isAccessible(f, getPlace)) return true
-          val clauses = f.paramClauses.clauses
-          //filtered cases
-          if (clauses.length > 2) return true
-          if (clauses.length == 2) {
-            if (!clauses(1).isImplicit) {
-              return true
-            }
-            if (f.hasTypeParameters) {
-              val typeParameters = f.typeParameters
-              for {
-                param <- clauses(1).parameters
-                paramType <- param.getType(TypingContext.empty)
-              } {
-                var hasTypeParametersInType = false
-                paramType.recursiveUpdate {
-                  case tp@TypeParameterType(_, _, _, _) if typeParameters.contains(tp.name) =>
-                    hasTypeParametersInType = true
-                    (true, tp)
-                  case tp: ScType if hasTypeParametersInType => (true, tp)
-                  case tp: ScType => (false, tp)
-                }
-                if (hasTypeParametersInType) return true //looks like it's not working in compiler 2.10, so it's faster to avoid it
-              }
-            }
-          }
-          if (clauses.isEmpty) {
-            val rt = subst.subst(f.returnType.getOrElse(return true))
-            if (funType == null || !rt.conforms(funType)) return true
-          } else if (clauses.head.parameters.length != 1 || clauses.head.isImplicit) return true
-          addResult(new ScalaResolveResult(f, subst, getImports(state)))
-        case b: ScBindingPattern =>
-          ScalaPsiUtil.nameContext(b) match {
-            case d: ScDeclaredElementsHolder if (d.isInstanceOf[ScValue] || d.isInstanceOf[ScVariable]) &&
-              d.asInstanceOf[ScModifierListOwner].hasModifierProperty("implicit") =>
-              if (!ResolveUtils.isAccessible(d.asInstanceOf[ScMember], getPlace)) return true
-              val tp = subst.subst(b.getType(TypingContext.empty).getOrElse(return true))
-              if (funType == null || !tp.conforms(funType)) return true
-              addResult(new ScalaResolveResult(b, subst, getImports(state)))
-            case _ => return true
-          }
-        case param: ScParameter if param.isImplicitParameter =>
-          param match {
-            case c: ScClassParameter =>
-              if (!ResolveUtils.isAccessible(c, getPlace)) return true
-            case _ =>
-          }
-          val tp = subst.subst(param.getType(TypingContext.empty).getOrElse(return true))
-          if (funType == null || !tp.conforms(funType)) return true
-          addResult(new ScalaResolveResult(param, subst, getImports(state)))
-        case obj: ScObject if obj.hasModifierProperty("implicit") =>
-          if (!ResolveUtils.isAccessible(obj, getPlace)) return true
-          val tp = subst.subst(obj.getType(TypingContext.empty).getOrElse(return true))
-          if (funType == null || !tp.conforms(funType)) return true
-          addResult(new ScalaResolveResult(obj, subst, getImports(state)))
-        case _ =>
-      }
-      case _ =>
+
+    def isAccessibleImplicit(member: ScMember) =
+      member.hasModifierProperty("implicit") && isAccessible(member, getPlace)
+
+    val maybeDefinition = Option(element).collect {
+      case definition: ScTypedDefinition => definition
+    }.filter(kindMatches).filter {
+      //there is special case for Predef.conforms method
+      case f: ScFunction =>
+        val functionIsAppropriate = isAccessibleImplicit(f) &&
+          checkFucntionIsEligible(f, getPlace) && !isConformsMethod(f)
+
+        val clauseIsAppropriate = f.paramClauses.clauses match {
+          case Seq(_, _, _, _*) => false
+          case Seq(_, clause) => clause.isImplicit
+          case Seq(clause, _*) => !clause.isImplicit && clause.parameters.length == 1
+          case _ => true
+        }
+
+        functionIsAppropriate && clauseIsAppropriate
+      case b: ScBindingPattern =>
+        ScalaPsiUtil.nameContext(b) match {
+          case context: ScValueOrVariable => isAccessibleImplicit(context)
+          case _ => false
+        }
+      case p: ScClassParameter => p.isImplicitParameter && isAccessible(p, getPlace)
+      case p: ScParameter => p.isImplicitParameter
+      case o: ScObject => isAccessibleImplicit(o)
+      case _ => false
     }
+
+    def substitute(`type`: ScType): (ScType, ScSubstitutor) = {
+      val substitutor = getSubst(state)
+      val actualSubstitutor = state.get(BaseProcessor.FROM_TYPE_KEY) match {
+        case null => substitutor
+        case tp => substitutor.followUpdateThisType(tp)
+      }
+
+      (actualSubstitutor.subst(`type`), actualSubstitutor)
+    }
+
+    val maybeSubstitutor = maybeDefinition.flatMap(_.getType().toOption)
+      .map(substitute)
+      .filter {
+        case (tp, _) => tp.conforms(function1Type)
+      }.map(_._2)
+
+    maybeDefinition.zip(maybeSubstitutor).map {
+      case (definition, substitutor) => new ScalaResolveResult(definition, substitutor, getImports(state))
+    }.foreach(addResult)
+
     true
   }
 }
@@ -112,8 +98,10 @@ class CollectImplicitsProcessor(expression: ScExpression, withoutPrecedence: Boo
 
 object CollectImplicitsProcessor {
   private def isConformsMethod(f: ScFunction): Boolean = {
-    (f.name == "conforms" || f.name == "$conforms") &&
-      Option(f.containingClass).flatMap(cls => Option(cls.qualifiedName)).contains("scala.Predef")
+    f.name.matches("(\\$)?conforms") &&
+      Option(f.containingClass).flatMap { clazz =>
+        Option(clazz.qualifiedName)
+      }.contains("scala.Predef")
   }
 
   def checkFucntionIsEligible(function: ScFunction, expression: PsiElement): Boolean = {
