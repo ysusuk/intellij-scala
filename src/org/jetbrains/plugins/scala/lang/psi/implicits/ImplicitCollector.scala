@@ -114,21 +114,21 @@ class ImplicitCollector(place: PsiElement,
 
       ProgressManager.checkCanceled()
 
-      if (fullInfo) collectFullInfo(visibleNamesCandidates() ++ fromTypeCandidates())
+      if (fullInfo) collectFullInfo(visibleNamesCandidates ++ fromTypeCandidates)
       else {
         val implicitCollectorCache = ImplicitCollector.cache(project)
-        implicitCollectorCache.get(place, tp) match {
-          case Some(cached) if !fullInfo => return cached
-          case _ =>
+        implicitCollectorCache.get(place, tp).foreach { cached =>
+          return cached
         }
 
-        val firstCandidates = compatible(visibleNamesCandidates())
-        val result =
-          if (firstCandidates.nonEmpty && !firstCandidates.forall(!_.isApplicable())) firstCandidates
-          else {
-            val secondCandidates = compatible(fromTypeCandidates())
-            if (secondCandidates.nonEmpty) secondCandidates else firstCandidates
-          }
+        val result = compatible(visibleNamesCandidates) match {
+          case candidates if candidates.exists(_.isApplicable()) => candidates
+          case defaultCandidates =>
+            compatible(fromTypeCandidates) match {
+              case Seq() => defaultCandidates
+              case candidates => candidates
+            }
+        }
 
         if (!isExtensionConversion) implicitCollectorCache.put(place, tp, result)
 
@@ -145,43 +145,46 @@ class ImplicitCollector(place: PsiElement,
     }
   }
 
-  private def visibleNamesCandidates(): Set[ScalaResolveResult] = {
-    val processor = new ImplicitParametersProcessor(withoutPrecedence = false)
-    var placeForTreeWalkUp = place
-    var lastParent: PsiElement = null
-    var stop = false
-    while (!stop) {
-      if (placeForTreeWalkUp == null || !placeForTreeWalkUp.processDeclarations(processor,
-        ResolveState.initial(), lastParent, place)) stop = true
-      placeForTreeWalkUp match {
+  private[implicits] def visibleNamesCandidates: Set[ScalaResolveResult] = {
+    val processor = createProcessor(withoutPrecedence = false)
+
+    // Collect implicit conversions from bottom to up
+    def treeWalkUp(p: PsiElement, lastParent: PsiElement) {
+      if (p == null) return
+      if (!p.processDeclarations(processor, ResolveState.initial, lastParent, place)) return
+
+      p match {
         case (_: ScTemplateBody | _: ScExtendsBlock) => //template body and inherited members are at the same level
-        case _ => if (!processor.changedLevel) stop = true
+        case _ => if (!processor.changedLevel) return
       }
-      if (!stop) {
-        lastParent = placeForTreeWalkUp
-        placeForTreeWalkUp = placeForTreeWalkUp.getContext
-      }
+      treeWalkUp(p.getContext, p)
     }
+
+    treeWalkUp(place, null)
 
     processor.candidatesS
   }
 
-  private def fromTypeCandidates(): Set[ScalaResolveResult] = {
-    val processor = new ImplicitParametersProcessor(withoutPrecedence = true)
-    ScalaPsiUtil.collectImplicitObjects(expandedTp)(place.elementScope).foreach {
+  private[implicits] def fromTypeCandidates: Set[ScalaResolveResult] = {
+    val processor = createProcessor(withoutPrecedence = true)
+
+    implicit val elementScope = place.elementScope
+    ScalaPsiUtil.collectImplicitObjects(expandedTp).foreach {
       processor.processType(_, place, ResolveState.initial())
     }
+
     processor.candidatesS
   }
+
+  protected def createProcessor(withoutPrecedence: Boolean): ImplicitProcessor =
+    new ImplicitParametersProcessor(withoutPrecedence = withoutPrecedence)
 
   private def compatible(candidates: Set[ScalaResolveResult]): Seq[ScalaResolveResult] = {
     //implicits found without local type inference have higher priority
-    val withoutLocalTypeInference = collectCompatibleCandidates(candidates, withLocalTypeInference = false)
-
-    val compatible =
-      if (withoutLocalTypeInference.nonEmpty) withoutLocalTypeInference
-      else collectCompatibleCandidates(candidates, withLocalTypeInference = true)
-
+    val compatible = collectCompatibleCandidates(candidates, withLocalTypeInference = false) match {
+      case Seq() => collectCompatibleCandidates(candidates, withLocalTypeInference = true)
+      case compatibleCandidates => compatibleCandidates
+    }
 
     mostSpecificUtil.mostSpecificForImplicitParameters(compatible) match {
       case Some(r) => Seq(r)

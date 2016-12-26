@@ -12,7 +12,6 @@ import org.jetbrains.plugins.scala.lang.psi.api.base.patterns.ScBindingPattern
 import org.jetbrains.plugins.scala.lang.psi.api.expr.ScExpression
 import org.jetbrains.plugins.scala.lang.psi.api.statements._
 import org.jetbrains.plugins.scala.lang.psi.api.statements.params.{PsiTypeParameterExt, ScParameter, ScParameterClause}
-import org.jetbrains.plugins.scala.lang.psi.api.toplevel.templates.{ScExtendsBlock, ScTemplateBody}
 import org.jetbrains.plugins.scala.lang.psi.api.toplevel.typedef._
 import org.jetbrains.plugins.scala.lang.psi.implicits.ScImplicitlyConvertible._
 import org.jetbrains.plugins.scala.lang.psi.types._
@@ -21,6 +20,7 @@ import org.jetbrains.plugins.scala.lang.psi.types.api.designator.ScDesignatorTyp
 import org.jetbrains.plugins.scala.lang.psi.types.nonvalue.Parameter
 import org.jetbrains.plugins.scala.lang.psi.types.result.{TypeResult, Typeable, TypingContext}
 import org.jetbrains.plugins.scala.lang.resolve.ScalaResolveResult
+import org.jetbrains.plugins.scala.lang.resolve.processor.ImplicitProcessor
 import org.jetbrains.plugins.scala.macroAnnotations.{CachedMappedWithRecursionGuard, ModCount}
 import org.jetbrains.plugins.scala.project.ScalaLanguageLevel.Scala_2_10
 import org.jetbrains.plugins.scala.project._
@@ -72,29 +72,15 @@ class ScImplicitlyConvertible(val expression: ScExpression,
   private def collectRegulars: Set[RegularImplicitResolveResult] = {
     ScalaPsiUtil.debug(s"Regular implicit map", LOG)
 
-    val typez = placeType.getOrElse(return Set.empty)
+    val typez = placeType.filter {
+      case Nothing => false
+      case _: UndefinedType => false
+      case _ => true
+    }.getOrElse(return Set.empty)
 
-    val processor = new CollectImplicitsProcessor(expression, false)
+    val collector = implicitCollector(typez, typez)
 
-    // Collect implicit conversions from bottom to up
-    def treeWalkUp(p: PsiElement, lastParent: PsiElement) {
-      if (p == null) return
-      if (!p.processDeclarations(processor,
-        ResolveState.initial,
-        lastParent, expression)) return
-      p match {
-        case (_: ScTemplateBody | _: ScExtendsBlock) => //template body and inherited members are at the same level
-        case _ => if (!processor.changedLevel) return
-      }
-      treeWalkUp(p.getContext, p)
-    }
-
-    treeWalkUp(expression, null)
-
-    if (typez == Nothing) return Set.empty
-    if (typez.isInstanceOf[UndefinedType]) return Set.empty
-
-    adaptResults(processor.candidatesS, typez).map {
+    adaptResults(collector.visibleNamesCandidates, typez).map {
       case (result, tp, substitutor) => RegularImplicitResolveResult(result, tp, substitutor)
     }
   }
@@ -111,15 +97,18 @@ class ScImplicitlyConvertible(val expression: ScExpression,
       case seq => TupleType(Seq(typez) ++ seq)
     }
 
-    val processor = new CollectImplicitsProcessor(expression, true)
-    ScalaPsiUtil.collectImplicitObjects(expandedType).foreach {
-      processor.processType(_, expression, ResolveState.initial())
-    }
+    val collector = implicitCollector(typez, expandedType)
 
-    adaptResults(processor.candidatesS, typez).map {
+    adaptResults(collector.fromTypeCandidates, typez).map {
       case (result, tp, substitutor) => CompanionImplicitResolveResult(result, tp, substitutor)
     }
   }
+
+  private def implicitCollector(`type`: ScType, expandedType: ScType) =
+    new ImplicitCollector(expression, `type`, expandedType, None, true) {
+      override protected def createProcessor(withoutPrecedence: Boolean): ImplicitProcessor =
+        new CollectImplicitsProcessor(expression, withoutPrecedence = withoutPrecedence)
+    }
 }
 
 object ScImplicitlyConvertible {
