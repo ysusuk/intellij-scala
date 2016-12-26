@@ -25,8 +25,7 @@ import org.jetbrains.plugins.scala.macroAnnotations.{CachedMappedWithRecursionGu
 import org.jetbrains.plugins.scala.project.ScalaLanguageLevel.Scala_2_10
 import org.jetbrains.plugins.scala.project._
 
-import scala.collection.mutable.ArrayBuffer
-import scala.collection.{Set, mutable}
+import scala.collection.Set
 
 /**
   * Utility class for implicit conversions.
@@ -45,25 +44,11 @@ class ScImplicitlyConvertible(val expression: ScExpression,
 
   import ScImplicitlyConvertible.LOG
 
-  def implicitMap(arguments: Seq[ScType] = Seq.empty): Seq[ImplicitResolveResult] = {
-    val seen = new mutable.HashSet[PsiNamedElement]
-    val buffer = new ArrayBuffer[ImplicitResolveResult]
-    for (elem <- collectRegulars) {
-      if (!seen.contains(elem.element)) {
-        seen += elem.element
-        buffer += elem
-      }
-    }
-
-    for (elem <- collectCompanions(arguments = arguments)) {
-      if (!seen.contains(elem.element)) {
-        seen += elem.element
-        buffer += elem
-      }
-    }
-
-    buffer
-  }
+  def implicitResolveResults(arguments: Seq[ScType] = Seq.empty): Seq[ImplicitResolveResult] =
+    (collectRegulars ++ collectCompanions(arguments = arguments)).map { result =>
+      (result.element, result)
+    }.toMap
+      .values.toSeq
 
   private def adaptResults(results: Set[ScalaResolveResult], `type`: ScType): Set[(ScalaResolveResult, ScType, ScSubstitutor)] =
     results.flatMap {

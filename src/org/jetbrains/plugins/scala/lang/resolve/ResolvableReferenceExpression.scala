@@ -493,7 +493,7 @@ trait ResolvableReferenceExpression extends ScReferenceExpression {
 
     processor match {
       case _: CompletionProcessor =>
-        new ScImplicitlyConvertible(e).implicitMap().foreach { result =>
+        new ScImplicitlyConvertible(e).implicitResolveResults().foreach { result =>
           //todo: args?
           val state = builder(result).state
           processor.processType(result.`type`, e, state)

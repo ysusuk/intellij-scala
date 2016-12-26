@@ -465,7 +465,7 @@ trait ScExpression extends ScBlockStatement with PsiAnnotationMemberValue with I
 
   def getAllImplicitConversions(fromUnderscore: Boolean = false): Seq[PsiNamedElement] = {
     new ScImplicitlyConvertible(this, fromUnderscore)
-      .implicitMap(arguments = expectedTypes(fromUnderscore).toSeq)
+      .implicitResolveResults(arguments = expectedTypes(fromUnderscore).toSeq)
       .map(_.element)
       .sortWith {
         case (first, second) =>
