@@ -25,17 +25,7 @@ class CollectImplicitsProcessor(val getPlace: ScExpression, withoutPrecedence: B
   extends ImplicitProcessor(StdKinds.refExprLastRef, withoutPrecedence) {
 
   def execute(element: PsiElement, state: ResolveState): Boolean = {
-    val function1Type = ScalaPsiManager.instance(getPlace.getProject)
-      .getCachedClass(getPlace.getResolveScope, "scala.Function1")
-      .collect {
-        case t: ScTrait => t
-      }.map { t =>
-      val parameters = t.typeParameters
-        .map(TypeParameterType(_))
-        .map(UndefinedType(_))
-
-      ScParameterizedType(designator(t), parameters)
-    }.getOrElse {
+    val function1Type = getPlace.elementScope.function1Type(level = 0).getOrElse {
       return true
     }
 
