@@ -1,7 +1,7 @@
 package org.jetbrains.plugins.scala.lang.psi.implicits
 
-import com.intellij.psi._
-import com.intellij.psi.util.PsiTreeUtil
+import com.intellij.psi.util.PsiTreeUtil.{findCommonContext, isContextAncestor}
+import com.intellij.psi.{PsiElement, ResolveState, StubBasedPsiElement}
 import org.jetbrains.plugins.scala.lang.psi.api.base.patterns.ScBindingPattern
 import org.jetbrains.plugins.scala.lang.psi.api.expr.ScExpression
 import org.jetbrains.plugins.scala.lang.psi.api.statements._
@@ -40,7 +40,7 @@ class CollectImplicitsProcessor(val getPlace: ScExpression, withoutPrecedence: B
       //there is special case for Predef.conforms method
       case f: ScFunction =>
         val functionIsAppropriate = isAccessibleImplicit(f) &&
-          checkFucntionIsEligible(f, getPlace) && !isConformsMethod(f)
+          isEligible(f, getPlace) && !isConformsMethod(f)
 
         val clauseIsAppropriate = f.paramClauses.clauses match {
           case Seq(_, _, _, _*) => false
@@ -94,39 +94,47 @@ object CollectImplicitsProcessor {
       }.contains("scala.Predef")
   }
 
-  def checkFucntionIsEligible(function: ScFunction, expression: PsiElement): Boolean = {
-    if (!function.hasExplicitType) {
-      if (PsiTreeUtil.isContextAncestor(function.getContainingFile, expression, false)) {
-        val commonContext = PsiTreeUtil.findCommonContext(function, expression)
-        if (expression == commonContext) return true //weird case, it covers situation, when function comes from object, not treeWalkUp
-        if (function == commonContext) return false
-        else {
-          var functionContext: PsiElement = function
-          while (functionContext.getContext != commonContext) functionContext = functionContext.getContext
-          var placeContext: PsiElement = expression
-          while (placeContext.getContext != commonContext) placeContext = placeContext.getContext
-          (functionContext, placeContext) match {
-            case (functionContext: ScalaPsiElement, placeContext: ScalaPsiElement) =>
-              val funElem = functionContext.getDeepSameElementInContext
-              val conElem = placeContext.getDeepSameElementInContext
-              val children = commonContext match {
-                case stubPsi: StubBasedPsiElement[_] =>
-                  val stub = stubPsi.getStub
-                  import scala.collection.JavaConverters._
-                  if (stub != null) stub.getChildrenStubs.asScala.map(_.getPsi).toArray
-                  else stubPsi.getChildren
-                case _ => commonContext.getChildren
-              }
-              children.find(elem => elem == funElem || elem == conElem) match {
-                case Some(elem) if elem == conElem => return false
-                case _ =>
-              }
-            case _ =>
-          }
-        }
+  def isEligible(function: ScFunction, expression: PsiElement): Boolean = {
+    Some(function)
+      .filter(!_.hasExplicitType)
+      .filter(f => isContextAncestor(f.getContainingFile, expression, false))
+      .map(findCommonContext(_, expression))
+      .forall {
+        case context if context == expression => true // weird case, it covers situation, when function comes from object, not treeWalkUp
+        case context if context == function => false
+        case context =>
+          implicit val commonContext = context
+          deepSameElementInContext(function)
+            .zip(deepSameElementInContext(expression))
+            .forall {
+              case (functionElement, expressionElement) => isDefinedEarlier(functionElement, expressionElement)
+            }
       }
-    }
-    true
   }
+
+  private def deepSameElementInContext(element: PsiElement)
+                                      (implicit context: PsiElement): Option[PsiElement] = {
+    var maybeContext = Option(element.getContext)
+    while (maybeContext.isDefined && maybeContext.get != context) {
+      maybeContext = maybeContext.map(_.getContext)
+    }
+
+    maybeContext.collect {
+      case scalaElement: ScalaPsiElement => scalaElement
+    }.map(_.getDeepSameElementInContext)
+  }
+
+  private def children(implicit context: PsiElement): Seq[PsiElement] = context match {
+    case stub: StubBasedPsiElement[_] if stub.getStub != null =>
+      import scala.collection.JavaConversions._
+      stub.getStub.getChildrenStubs.map(_.getPsi)
+    case _ => context.getChildren
+  }
+
+  private def isDefinedEarlier(functionElement: PsiElement, expressionElement: PsiElement)
+                              (implicit context: PsiElement): Boolean =
+    children.find { child =>
+      child == functionElement || child == expressionElement
+    }.forall(_ != expressionElement)
 }
 

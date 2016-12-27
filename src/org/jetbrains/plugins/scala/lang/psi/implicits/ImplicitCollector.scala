@@ -20,6 +20,7 @@ import org.jetbrains.plugins.scala.lang.psi.api.toplevel.typedef.{ScMember, ScOb
 import org.jetbrains.plugins.scala.lang.psi.api.toplevel.{ScNamedElement, ScTypedDefinition}
 import org.jetbrains.plugins.scala.lang.psi.api.{InferUtil, MacroInferUtil}
 import org.jetbrains.plugins.scala.lang.psi.impl.ScalaPsiManager
+import org.jetbrains.plugins.scala.lang.psi.implicits.CollectImplicitsProcessor.isEligible
 import org.jetbrains.plugins.scala.lang.psi.implicits.ExtensionConversionHelper.extensionConversionCheck
 import org.jetbrains.plugins.scala.lang.psi.implicits.ImplicitCollector._
 import org.jetbrains.plugins.scala.lang.psi.types._
@@ -238,13 +239,12 @@ class ImplicitCollector(place: PsiElement,
     override def candidatesS: Set[ScalaResolveResult] =
       super.candidatesS.filterNot(c => lowerInFileWithoutType(c) || isContextAncestor(c))
 
-    private def isAccessible(member: ScMember): Boolean = {
-      isPredefPriority || (member match {
-        case fun: ScFunction =>
-          CollectImplicitsProcessor.checkFucntionIsEligible(fun, getPlace) && ResolveUtils.isAccessible(member, getPlace)
-        case _ => ResolveUtils.isAccessible(member, getPlace)
-      })
-    }
+    private def isAccessible(member: ScMember): Boolean =
+      isPredefPriority ||
+        (ResolveUtils.isAccessible(member, getPlace) && (member match {
+          case f: ScFunction => isEligible(f, getPlace)
+          case _ => true
+        }))
 
     private def lowerInFileWithoutType(c: ScalaResolveResult) = {
       def lowerInFile(e: PsiElement) = e.containingFile == getPlace.containingFile &&
